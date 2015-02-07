@@ -66,6 +66,12 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   # Ruby style regexp of keys to exclude from the bucket
   config :exclude_pattern, :validate => :string, :default => nil
 
+  # Start date to process
+  config :start_date, :validate => :string, :default => nil
+  
+  # End date to process
+  config :end_date, :validate => :string, :default => nil
+
   public
   def register
     require "digest/md5"
@@ -103,12 +109,43 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   def list_new_files
     objects = {}
 
+    if @start_date and @end_date
+      day = Time.parse(@start_date)
+      end_day = Time.parse(@end_date)
+      while (day < end_day)
+        day_text = day.strftime("%Y%m%d")
+        day_prefix = @prefix.sub! '%YYYYMMDD%', day_text
+        @logger.debug("S3 input: Using prefix", :day_prefix => day_prefix)
+        @s3bucket.objects.with_prefix(day_prefix).each do |log|
+          @logger.debug("S3 input: Found key in today prefix", :key => log.key)
+          unless ignore_filename?(log.key)
+            if sincedb.newer?(log.last_modified)
+              objects[log.key] = log.last_modified
+              @logger.debug("S3 input: Adding to objects[]", :key => log.key)
+            end
+          end
+          day = day + 86400
+        end
+        @start_date = nil
+        return objects.keys.sort {|a,b| objects[a] <=> objects[b]}
+      end
+    end
+    
+    if @end_date
+      end_day = Time.parse(@end_date)
+      if (Time.now > end_day)
+        return objects
+      end
+    end
+       
     today = Time.now.strftime("%Y%m%d")
     today_prefix = @prefix.sub! '%YYYYMMDD%', today
 
     yesterday = (Time.now - 86400).strftime("%Y%m%d")
     yesterday_prefix = @prefix.sub! '%YYYYMMDD%', yesterday
 
+    @logger.debug("S3 input: Using prefix", :day_prefix => today_prefix)
+    
     # Checking in todays prefix
     @s3bucket.objects.with_prefix(today_prefix).each do |log|
       @logger.debug("S3 input: Found key in today prefix", :key => log.key)
