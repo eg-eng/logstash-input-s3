@@ -7,6 +7,7 @@ require "time"
 require "tmpdir"
 require "stud/interval"
 require "stud/temporary"
+require "xz"
 
 # Stream events from files from a S3 bucket.
 #
@@ -14,6 +15,7 @@ require "stud/temporary"
 # Files ending in `.gz` are handled as gzip'ed files.
 class LogStash::Inputs::S3 < LogStash::Inputs::Base
   include LogStash::PluginMixins::AwsConfig
+  milestone 1
 
   config_name "s3"
 
@@ -101,9 +103,15 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   def list_new_files
     objects = {}
 
-    @s3bucket.objects.with_prefix(@prefix).each do |log|
-      @logger.debug("S3 input: Found key", :key => log.key)
+    today = Time.now.strftime("%Y%m%d")
+    today_prefix = @prefix.sub! '%YYYYMMDD%', today
 
+    yesterday = (Time.now - 86400).strftime("%Y%m%d")
+    yesterday_prefix = @prefix.sub! '%YYYYMMDD%', yesterday
+
+    # Checking in todays prefix
+    @s3bucket.objects.with_prefix(today_prefix).each do |log|
+      @logger.debug("S3 input: Found key in today prefix", :key => log.key)
       unless ignore_filename?(log.key)
         if sincedb.newer?(log.last_modified)
           objects[log.key] = log.last_modified
@@ -111,6 +119,20 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
         end
       end
     end
+
+    if @prefix.include? "%YYYYMMDD%"
+      # Checking in yesterday prefix
+      @s3bucket.objects.with_prefix(yesterday_prefix).each do |log|
+        @logger.debug("S3 input: Found key in yesterday prefix", :key => log.key)
+        unless ignore_filename?(log.key)
+          if sincedb.newer?(log.last_modified)
+            objects[log.key] = log.last_modified
+            @logger.debug("S3 input: Adding to objects[]", :key => log.key)
+          end
+        end
+      end
+    end
+
     return objects.keys.sort {|a,b| objects[a] <=> objects[b]}
   end # def fetch_new_files
 
@@ -136,9 +158,16 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
   private
   def process_local_log(queue, filename)
-    @codec.decode(File.open(filename, 'rb')) do |event|
-      decorate(event)
-      queue << event
+    if filename.end_with?('.xz')
+      @codec.decode(XZ.decompress(File.open(filename, 'rb').read)) do |event|
+        decorate(event)
+        queue << event
+      end
+    else
+      @codec.decode(File.open(filename, 'rb').read) do |event|
+        decorate(event)
+        queue << event
+      end
     end
   end # def process_local_log
   
@@ -199,6 +228,8 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
     backup_to_bucket(object, key)
     backup_to_dir(filename)
+
+    FileUtils.rm_rf(tmp)
 
     delete_file_from_bucket(object)
   end
