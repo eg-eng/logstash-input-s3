@@ -72,6 +72,9 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   # End date to process
   config :end_date, :validate => :string, :default => nil
 
+  # Disable actual file download, list files only
+  config :debug_skip_download, :validate => :boolean, :default => false
+
   public
   def register
     require "digest/md5"
@@ -114,7 +117,7 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
       end_day = Time.parse(@end_date)
       while (day < end_day)
         day_text = day.strftime("%Y%m%d")
-        day_prefix = @prefix.sub! '%YYYYMMDD%', day_text
+        day_prefix = @prefix.sub '%YYYYMMDD%', day_text
         @logger.debug("S3 input: Using prefix", :day_prefix => day_prefix)
         @s3bucket.objects.with_prefix(day_prefix).each do |log|
           @logger.debug("S3 input: Found key in today prefix", :key => log.key)
@@ -138,13 +141,19 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
       end
     end
        
+
+    @logger.debug("S3 input: Base prefix is " + @prefix)
+
     today = Time.now.strftime("%Y%m%d")
-    today_prefix = @prefix.sub! '%YYYYMMDD%', today
+    @logger.debug("S3 input: today is " + today)
+
+    today_prefix = @prefix.sub '%YYYYMMDD%', today
+    @logger.debug("S3 input: Using prefix "+ today_prefix)
 
     yesterday = (Time.now - 86400).strftime("%Y%m%d")
-    yesterday_prefix = @prefix.sub! '%YYYYMMDD%', yesterday
+    yesterday_prefix = @prefix.sub '%YYYYMMDD%', yesterday
 
-    @logger.debug("S3 input: Using prefix", :day_prefix => today_prefix)
+    @logger.debug("S3 input: Using prefix " + today_prefix)
     
     # Checking in todays prefix
     @s3bucket.objects.with_prefix(today_prefix).each do |log|
@@ -195,6 +204,9 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
   private
   def process_local_log(queue, filename)
+    if @debug_skip_download
+    	return
+    end
     if filename.end_with?('.xz')
       @codec.decode(XZ.decompress(File.open(filename, 'rb').read)) do |event|
         decorate(event)
@@ -259,7 +271,9 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
     filename = File.join(tmp, File.basename(key))
 
-    download_remote_file(object, filename)
+    if !@debug_skip_download
+	download_remote_file(object, filename)
+    end
 
     process_local_log(queue, filename)
 
