@@ -82,6 +82,8 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
     @region = get_region
 
+    @executor_id = ENV['ID']
+
     @logger.info("Registering s3 input", :bucket => @bucket, :region => @region)
 
     s3 = get_s3object
@@ -203,6 +205,27 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   end
 
   private
+  def process_log_stream(queue, key)
+    object = @s3bucket.objects[key]
+
+    if filename.end_with?('.xz')
+       @codec.decode(XZ.decompress(object.read)) do |event|
+	 decorate(event) 
+	 queue << event
+       end
+    else
+       @codec.decode(object.read) do |event|
+	 decorate(event)
+	 queue << event
+       end
+     end
+     backup_to_bucket(object, key)
+
+     delete_file_from_bucket(object)
+     	 
+   end
+
+  private
   def process_local_log(queue, filename)
     if @debug_skip_download
     	return
@@ -232,8 +255,20 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   end
 
   private
+  def hash(value)
+     hashval = 0
+     value.each_char do |c|
+     hashval = hashval * 31 + c.ord
+     end
+  return hashval
+
+  end
+
+
+  private
   def sincedb_file
-    File.join(ENV["HOME"], ".sincedb_" + Digest::MD5.hexdigest("#{@bucket}+#{@prefix}"))
+    partition_prefix = (@executor_id.nil?) ? -1 : @executor_id
+    File.join(ENV["HOME"], ".sincedb_" + partition_prefix.to_s + "_" +Digest::MD5.hexdigest("#{@bucket}+#{@prefix}"))
   end
 
   private
@@ -242,11 +277,23 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
     objects.each do |key|
       @logger.debug("S3 input processing", :bucket => @bucket, :key => key)
 
-      lastmod = @s3bucket.objects[key].last_modified
+      if @executor_id.nil?
+        partition = 0
+        @executor_id = 0
+      else
+        partition = hash(k) % @total_executors
+      end
 
-      process_log(queue, key)
+      if (partition == @executor_id.to_i)
+        @logger.info("S3 input matched", :bucket => @bucket, :key => k)
+        lastmod = @s3bucket.objects[key].last_modified
+        #process_log(queue, key)
+        process_log_stream(queue, key)
 
-      sincedb.write(lastmod)
+        sincedb.write(lastmod)
+      else
+           @logger.info("S3 input skipping", :bucket => @bucket, :key => k, :partition => partition, :executor_id => @executor_id.to_i)
+      end
     end
   end # def process_files
 
