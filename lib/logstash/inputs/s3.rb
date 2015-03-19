@@ -75,6 +75,9 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   # Disable actual file download, list files only
   config :debug_skip_download, :validate => :boolean, :default => false
 
+  # total executors for this input
+  config :total_executors, :validate => :number, :default => 1
+
   public
   def register
     require "digest/md5"
@@ -208,7 +211,7 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
   def process_log_stream(queue, key)
     object = @s3bucket.objects[key]
 
-    if filename.end_with?('.xz')
+    if key.end_with?('.xz')
        @codec.decode(XZ.decompress(object.read)) do |event|
 	 decorate(event) 
 	 queue << event
@@ -279,20 +282,21 @@ class LogStash::Inputs::S3 < LogStash::Inputs::Base
 
       if @executor_id.nil?
         partition = 0
-        @executor_id = 0
+        @executor_id = "0"
       else
-        partition = hash(k) % @total_executors
+        partition = hash(key) % @total_executors
       end
 
-      if (partition == @executor_id.to_i)
-        @logger.info("S3 input matched", :bucket => @bucket, :key => k)
+      #if (partition == @executor_id.to_i)
+      if (partition == 0)
+        @logger.info("S3 input matched", :bucket => @bucket, :key => key)
         lastmod = @s3bucket.objects[key].last_modified
         #process_log(queue, key)
         process_log_stream(queue, key)
 
         sincedb.write(lastmod)
       else
-           @logger.info("S3 input skipping", :bucket => @bucket, :key => k, :partition => partition, :executor_id => @executor_id.to_i)
+           @logger.info("S3 input skipping", :bucket => @bucket, :key => key, :partition => partition, :executor_id => @executor_id.to_i)
       end
     end
   end # def process_files
